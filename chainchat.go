@@ -17,9 +17,9 @@ var chatIndexStr = "_chatindex"
 var openTradesStr = "_opentrades"
 
 type Message struct{ 
-    Msg string `json: "msg"`
-    To string `json: "to"`
-    User string `json: "user"`
+    Msg string `json:"msg"`
+    To string `json:"to"`
+    User string `json:"user"`
 }
 
 //Main function
