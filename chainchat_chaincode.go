@@ -25,11 +25,9 @@ import (
 	"encoding/json"
     "errors"
 	"fmt"
-	"strconv"
-	"strings"
-	"time"
-	
-
+	//"strconv"
+	//"strings"
+	//"time"
 	"github.com/hyperledger/fabric/core/chaincode/shim"
 )
 
@@ -40,13 +38,15 @@ type ChainchatChaincode struct {
 var msgIndexStr = "_msgindex"				//name for the key/value that will store a list of all known messages
 var openTradesStr = "_opentrades"			// no idea what this is
 
-type Message struct{  // Message that gets added to blockchain
-	MessageID 			string `json: "messageid"`
-    Message 			string `json: "message"`
-	// SenderName		string `json: "sendername"`
-	// ReceiverName		string `json: "receivername"`
-    SenderPublicKey 	string `json: "senderpublickey"`
-	Time				string `json: "time"`
+type MessageResults struct {
+	Messages []Message `json:"messages"`
+}
+
+type Message struct {  // Message that gets added to blockchain
+	MessageID 			int64 	`json:"messageid"`
+    Message 			string 	`json:"message"`
+    SenderPublicKey 	string 	`json:"senderpublickey"`
+	Time				string 	`json:"time"`
 }
 
 // ============================================================================================================================
@@ -70,7 +70,7 @@ func (t *ChainchatChaincode) Init(stub *shim.ChaincodeStub, function string, arg
 
 	if function == "init" {
 		err := stub.CreateTable("Receiver_Publickey", []*shim.ColumnDefinition{
-			{"MessageID", shim.ColumnDefinition_STRING, false},
+			{"MessageID", shim.ColumnDefinition_INT64, false},
 			{"Message", shim.ColumnDefinition_STRING, false},
 			{"SenderPublicKey", shim.ColumnDefinition_STRING, false},
 			{"Time", shim.ColumnDefinition_STRING, false},
@@ -104,12 +104,10 @@ func (t *ChainchatChaincode) Invoke(stub *shim.ChaincodeStub, function string, a
 }
 
 // msg_delete: Deletes messages and its associated table from the chainstate
-func (t *SimpleChaincode) msg_delete(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+func (t *ChainchatChaincode) msg_delete(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
 	if len(args) != 1 {
 		return nil, errors.New("Incorrect number of arguments. Expecting 1")
 	}
-	
-	public_key := args[0]
 	
 	err := stub.DeleteTable("Receiver_PublicKey")									//removes message associated table from chain state
 
@@ -157,7 +155,7 @@ func (t *SimpleChaincode) msg_delete(stub *shim.ChaincodeStub, args []string) ([
 // } */
 
 // msg_init: Stores a message and its associated table in the chainstate
-func (t *SimpleChaincode) msg_init(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+func (t *ChainchatChaincode) msg_init(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
 	if len(args) != 3 {
 		return nil, errors.New("Incorrect number of arguments. Expecting 3")
 	}
@@ -166,19 +164,18 @@ func (t *SimpleChaincode) msg_init(stub *shim.ChaincodeStub, args []string) ([]b
 	// args[1] - SenderPublicKey
 	// args[2] - Time
 
-	var msg_id int
-	msg_id := 0 			//MessageID
+	var msg_id int = 0											//MessageID
 
 	table, t_err := stub.GetTable("Receiver_PublicKey")
+
 	if t_err == nil {
+		
+		msg_id++												//increments MessageID for every new message received 
+
 		rowAdded, r_err := stub.InsertRow(table.Name, shim.Row{
 			[]*shim.Column{
-				{&shim.Column_String_{msg_id++}},
-				{&shim.Column_String_{time.Now().Format(time.RFC3339)}},
-				{&shim.Column_String_{time.Now().Add(time.Hour * 24 * 365 * time.Duration(length)).Format(time.RFC3339)}},
-				{&shim.Column_String_{time.Now().Format(time.RFC3339)}},
-				{&shim.Column_Bool{true}},
-				{&shim.Column_String_{""}},
+				{&shim.Column_Int64{int64(msg_id)}},
+				{&shim.Column_String_{args[0]}},				 
 				{&shim.Column_String_{args[1]}},
 				{&shim.Column_String_{args[2]}},
 			},
@@ -187,37 +184,44 @@ func (t *SimpleChaincode) msg_init(stub *shim.ChaincodeStub, args []string) ([]b
 		if r_err != nil || !rowAdded {
 			return nil, errors.New(fmt.Sprintf("Error creating row: %s", r_err))
 		}
-
-
-
+	}
+	return nil,nil
 }
 
-func (t *SimpleChaincode) msg_unread(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+func (t *ChainchatChaincode) msg_unread(stub *shim.ChaincodeStub, args []string) ([]Message, error) {
 	if len(args) != 1 {
 		return nil, errors.New("Incorrect number of arguments. Expecting 1")
 	}
 
 	table, err := stub.GetTable("Receiver_PublicKey")
 	if err != nil {
-		return errors.New("The receiver public key message table does not exist")
+		return nil, errors.New("The receiver public key message table does not exist")
 	}
 
-	row, r_err := stub.GetRows(table.Name, []shim.Column{})
-	if r_err != nil || len(row.Columns) == 0 {
-		return errors.New("Message records do not exists")
+	rows, r_err := stub.GetRows(table.Name, []shim.Column{})
+	if r_err != nil || len(rows) == 0 {
+		return nil, errors.New("Message records do not exists")
 	}
 
-	msg_delete(stub, args[0]) 
+	// msg_delete(stub, args[0])							// not sure if we need to call delete here
 
-	return Message{
-		MessageID:     			t.readStringSafe(row.Columns[0]),
-		Message:     			t.readStringSafe(row.Columns[1]),
-		SenderPublicKey:     	t.readStringSafe(row.Columns[2]),
-		Time:     				t.readStringSafe(row.Columns[3]),
-	}, nil 
+	var messageResults []Message
+
+	for index:=0; index < len(rows); index++ {
+		var currentRow shim.Row = <- rows
+
+		messageResults = append(messageResults, Message{
+		MessageID:     			t.readInt64Safe(currentRow.Columns[0]),
+		Message:     			t.readStringSafe(currentRow.Columns[1]),
+		SenderPublicKey:     	t.readStringSafe(currentRow.Columns[2]),
+		Time:     				t.readStringSafe(currentRow.Columns[3]),
+	})
+	}
+
+	return messageResults, nil 
 }
 
-func (t *SimpleChaincode) readStringSafe(col *shim.Column) string {
+func (t *ChainchatChaincode) readStringSafe(col *shim.Column) string {
 	if col == nil {
 		return ""
 	}
@@ -225,15 +229,15 @@ func (t *SimpleChaincode) readStringSafe(col *shim.Column) string {
 	return col.GetString_()
 }
 
-func (t *SimpleChaincode) readInt32Safe(col *shim.Column) int32 {
+func (t *ChainchatChaincode) readInt64Safe(col *shim.Column) int64 {
 	if col == nil {
 		return 0
 	}
 
-	return col.GetInt32()
+	return col.GetInt64()
 }
 
-func (t *SimpleChaincode) readBoolSafe(col *shim.Column) bool {
+func (t *ChainchatChaincode) readBoolSafe(col *shim.Column) bool {
 	if col == nil {
 		return false
 	}
@@ -249,34 +253,22 @@ func (t *ChainchatChaincode) Query(stub *shim.ChaincodeStub, function string, ar
 
 	// Handle different functions
 	if function == "msg_unread" {											//retrieves unread messages from chaincode state
-		return t.msg_unread(stub, args)
+	messageResults, messageResults_err := t.msg_unread(stub, args)
+	if messageResults_err != nil {
+		return nil, errors.New("{\"error\":\"" + messageResults_err.Error() + "\"}")
 	}
-	else if function == "msg_history" {	
-																			//retrieves history of messages from blocks
+	converted, converted_err := json.Marshal(MessageResults{messageResults})
+	if converted_err != nil {
+		return nil, errors.New("{\"error\":\"" + converted_err.Error() + "\"}")
 	}
+	return converted, nil
+	}
+	// else if function == "msg_history" {	
+	// 	return t.msg_history(stub, args)									//retrieves history of messages from blocks														
+	// }
 	fmt.Println("query did not find func: " + function)						//error
 	return nil, errors.New("Received unknown function query")
 }
-
-//Read
-func (t *ChainchatChaincode) read(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
-	var , jsonResp string
-	var err error
-
-	if len(args) != 1 {
-		return nil, errors.New("Incorrect number of arguments. Expecting name of the var to query")
-	}
-
-	name = args[0]
-	valAsbytes, err := stub.GetState(name)									//get the var from chaincode state
-	if err != nil {
-		jsonResp = "{\"Error\":\"Failed to get state for " + name + "\"}"
-		return nil, errors.New(jsonResp)
-	}
-
-	return valAsbytes, nil													//send it onward
-}
-
 
 //Delete
 
@@ -300,51 +292,51 @@ func (t *ChainchatChaincode) read(stub *shim.ChaincodeStub, args []string) ([]by
 // 	return nil, nil
 // }
 
-//Init message
-func (t *ChainchatChaincode) init_msg(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
-	var err error
+// //Init message
+// func (t *ChainchatChaincode) init_msg(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+// 	var err error
 
-	//   0       1       2    
-	// "asdf", "You",   "Me"
-	if len(args) != 3 {
-		return nil, errors.New("Incorrect number of arguments. Expecting 4")
-	}
+// 	//   0       1       2    
+// 	// "asdf", "You",   "Me"
+// 	if len(args) != 3 {
+// 		return nil, errors.New("Incorrect number of arguments. Expecting 4")
+// 	}
 
-	fmt.Println("- start init message")
-	if len(args[0]) <= 0 {
-		return nil, errors.New("1st argument must be a non-empty string")
-	}
-	if len(args[1]) <= 0 {
-		return nil, errors.New("2nd argument must be a non-empty string")
-	}
-	if len(args[2]) <= 0 {
-		return nil, errors.New("3rd argument must be a non-empty string")
-	}
+// 	fmt.Println("- start init message")
+// 	if len(args[0]) <= 0 {
+// 		return nil, errors.New("1st argument must be a non-empty string")
+// 	}
+// 	if len(args[1]) <= 0 {
+// 		return nil, errors.New("2nd argument must be a non-empty string")
+// 	}
+// 	if len(args[2]) <= 0 {
+// 		return nil, errors.New("3rd argument must be a non-empty string")
+// 	}
 
 
-	to := strings.ToLower(args[1])
-	user := strings.ToLower(args[2])
+// 	to := strings.ToLower(args[1])
+// 	user := strings.ToLower(args[2])
 
-	str := `{"msg": "` + args[0] + `", "To": "` + to + `, "user": "` + user + `"}`
-	err = stub.PutState(args[0], []byte(str))								//store message with id as key
-	if err != nil {
-		return nil, err
-	}
+// 	str := `{"msg": "` + args[0] + `", "To": "` + to + `, "user": "` + user + `"}`
+// 	err = stub.PutState(args[0], []byte(str))								//store message with id as key
+// 	if err != nil {
+// 		return nil, err
+// 	}
 		
-	//get the chat index
-	msgAsBytes, err := stub.GetState(chatIndexStr)
-	if err != nil {
-		return nil, errors.New("Failed to get marble index")
-	}
-	var chatIndex []string
-	json.Unmarshal(msgAsBytes, &chatIndex)							//un stringify it aka JSON.parse()
+// 	//get the chat index
+// 	msgAsBytes, err := stub.GetState(chatIndexStr)
+// 	if err != nil {
+// 		return nil, errors.New("Failed to get marble index")
+// 	}
+// 	var chatIndex []string
+// 	json.Unmarshal(msgAsBytes, &chatIndex)							//un stringify it aka JSON.parse()
 	
-	//append
-	chatIndex = append(chatIndex, args[0])								//add marble name to index list
-	fmt.Println("! chat index: ", chatIndex)
-	jsonAsBytes, _ := json.Marshal(chatIndex)
-	err = stub.PutState(chatIndexStr, jsonAsBytes)						//store name of marble
+// 	//append
+// 	chatIndex = append(chatIndex, args[0])								//add marble name to index list
+// 	fmt.Println("! chat index: ", chatIndex)
+// 	jsonAsBytes, _ := json.Marshal(chatIndex)
+// 	err = stub.PutState(chatIndexStr, jsonAsBytes)						//store name of marble
 
-	fmt.Println("- end init marble")
-	return nil, nil
-}
+// 	fmt.Println("- end init marble")
+// 	return nil, nil
+// }
