@@ -41,10 +41,11 @@ var msgIndexStr = "_msgindex"				//name for the key/value that will store a list
 var openTradesStr = "_opentrades"			// no idea what this is
 
 type Message struct{  // Message that gets added to blockchain
+	MessageID 			string `json: "messageid"`
     Message 			string `json: "message"`
-	SenderName			string `json: "sendername"`
-	ReceiverName		string `json: "receivername"`
-    RecieverPublicKey 	string `json: "recieverpublickey"`
+	// SenderName		string `json: "sendername"`
+	// ReceiverName		string `json: "receivername"`
+    SenderPublicKey 	string `json: "senderpublickey"`
 	Time				string `json: "time"`
 }
 
@@ -68,11 +69,10 @@ func (t *ChainchatChaincode) Init(stub *shim.ChaincodeStub, function string, arg
 	}
 
 	if function == "init" {
-		err := stub.CreateTable("Publickey", []*shim.ColumnDefinition{
+		err := stub.CreateTable("Receiver_Publickey", []*shim.ColumnDefinition{
 			{"MessageID", shim.ColumnDefinition_STRING, false},
 			{"Message", shim.ColumnDefinition_STRING, false},
-			{"SenderName", shim.ColumnDefinition_STRING, false},
-			{"ReceiverName", shim.ColumnDefinition_STRING, false},
+			{"SenderPublicKey", shim.ColumnDefinition_STRING, false},
 			{"Time", shim.ColumnDefinition_STRING, false},
 		})
 
@@ -82,15 +82,6 @@ func (t *ChainchatChaincode) Init(stub *shim.ChaincodeStub, function string, arg
 	}
 
 	return nil, nil
-}
-
-
-// ============================================================================================================================
-// Run - Our entry point for Invocations 
-// ============================================================================================================================
-func (t *ChainchatChaincode) Run(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
-	fmt.Println("run is running " + function)
-	return t.Invoke(stub, function, args)
 }
 
 // ============================================================================================================================
@@ -104,24 +95,23 @@ func (t *ChainchatChaincode) Invoke(stub *shim.ChaincodeStub, function string, a
 		return t.Init(stub, "init", args)
 	} else if function == "msg_delete" {									//deletes a message from its state
 		return t.msg_delete(stub, args)
-	} else if function == "msg_unread" {									//retrieves unread messages from chaincode state
-		return t.msg_unread(stub, args)
-	} else if function == "msg_history" {									//retrieves history of messages from blocks
-	}
+	} else if function == "msg_init" {										//creates a table with all message details
+		return t.msg_init(stub, args)
+	} 
 	fmt.Println("invoke did not find func: " + function)					//error
 
 	return nil, errors.New("Received unknown function invocation")
 }
 
+// msg_delete: Deletes messages and its associated table from the chainstate
 func (t *SimpleChaincode) msg_delete(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
 	if len(args) != 1 {
 		return nil, errors.New("Incorrect number of arguments. Expecting 1")
 	}
-
 	
 	public_key := args[0]
 	
-	err := stub.DeleteTable("PublicKey")									//remove messages in chain state
+	err := stub.DeleteTable("Receiver_PublicKey")									//removes message associated table from chain state
 
 	if err != nil {
 		fmt.Printf("Error deleting table: %s", err)
@@ -166,14 +156,50 @@ func (t *SimpleChaincode) msg_delete(stub *shim.ChaincodeStub, args []string) ([
 // 	return nil, nil
 // } */
 
+// msg_init: Stores a message and its associated table in the chainstate
+func (t *SimpleChaincode) msg_init(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+	if len(args) != 3 {
+		return nil, errors.New("Incorrect number of arguments. Expecting 3")
+	}
+
+	// args[0] - Message
+	// args[1] - SenderPublicKey
+	// args[2] - Time
+
+	var msg_id int
+	msg_id := 0 			//MessageID
+
+	table, t_err := stub.GetTable("Receiver_PublicKey")
+	if t_err == nil {
+		rowAdded, r_err := stub.InsertRow(table.Name, shim.Row{
+			[]*shim.Column{
+				{&shim.Column_String_{msg_id++}},
+				{&shim.Column_String_{time.Now().Format(time.RFC3339)}},
+				{&shim.Column_String_{time.Now().Add(time.Hour * 24 * 365 * time.Duration(length)).Format(time.RFC3339)}},
+				{&shim.Column_String_{time.Now().Format(time.RFC3339)}},
+				{&shim.Column_Bool{true}},
+				{&shim.Column_String_{""}},
+				{&shim.Column_String_{args[1]}},
+				{&shim.Column_String_{args[2]}},
+			},
+		})
+
+		if r_err != nil || !rowAdded {
+			return nil, errors.New(fmt.Sprintf("Error creating row: %s", r_err))
+		}
+
+
+
+}
+
 func (t *SimpleChaincode) msg_unread(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
 	if len(args) != 1 {
 		return nil, errors.New("Incorrect number of arguments. Expecting 1")
 	}
 
-	table, err := stub.GetTable("PublicKey")
+	table, err := stub.GetTable("Receiver_PublicKey")
 	if err != nil {
-		return errors.New("The public key message table does not exist")
+		return errors.New("The receiver public key message table does not exist")
 	}
 
 	row, r_err := stub.GetRows(table.Name, []shim.Column{})
@@ -184,11 +210,10 @@ func (t *SimpleChaincode) msg_unread(stub *shim.ChaincodeStub, args []string) ([
 	msg_delete(stub, args[0]) 
 
 	return Message{
-		MessageID:     	t.readStringSafe(row.Columns[0]),
-		Message:     	t.readStringSafe(row.Columns[1]),
-		SenderName:     t.readStringSafe(row.Columns[2]),
-		ReceiverName: 	t.readStringSafe(row.Columns[3]),
-		Time:     		t.readStringSafe(row.Columns[4]),
+		MessageID:     			t.readStringSafe(row.Columns[0]),
+		Message:     			t.readStringSafe(row.Columns[1]),
+		SenderPublicKey:     	t.readStringSafe(row.Columns[2]),
+		Time:     				t.readStringSafe(row.Columns[3]),
 	}, nil 
 }
 
@@ -215,13 +240,19 @@ func (t *SimpleChaincode) readBoolSafe(col *shim.Column) bool {
 
 	return col.GetBool()
 }
-//Query
+
+// ============================================================================================================================
+// Query - Used for reading data from the chainstate
+// ============================================================================================================================
 func (t *ChainchatChaincode) Query(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
 	fmt.Println("query is running " + function)
 
 	// Handle different functions
-	if function == "read" {													//read all messages received
-		return t.read(stub, args)
+	if function == "msg_unread" {											//retrieves unread messages from chaincode state
+		return t.msg_unread(stub, args)
+	}
+	else if function == "msg_history" {	
+																			//retrieves history of messages from blocks
 	}
 	fmt.Println("query did not find func: " + function)						//error
 	return nil, errors.New("Received unknown function query")
@@ -250,24 +281,24 @@ func (t *ChainchatChaincode) read(stub *shim.ChaincodeStub, args []string) ([]by
 //Delete
 
 
-//Write
-func (t *ChainchatChaincode) Write(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
-	var name, value string // Entities
-	var err error
-	fmt.Println("running write()")
+// //Write
+// func (t *ChainchatChaincode) Write(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+// 	var name, value string // Entities
+// 	var err error
+// 	fmt.Println("running write()")
 
-	if len(args) != 2 {
-		return nil, errors.New("Incorrect number of arguments. Expecting 2. name of the variable and value to set")
-	}
+// 	if len(args) != 2 {
+// 		return nil, errors.New("Incorrect number of arguments. Expecting 2. name of the variable and value to set")
+// 	}
 
-	name = args[0]															//rename for funsies
-	value = args[1]
-	err = stub.PutState(name, []byte(value))								//write the variable into the chaincode state
-	if err != nil {
-		return nil, err
-	}
-	return nil, nil
-}
+// 	name = args[0]															//rename for funsies
+// 	value = args[1]
+// 	err = stub.PutState(name, []byte(value))								//write the variable into the chaincode state
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	return nil, nil
+// }
 
 //Init message
 func (t *ChainchatChaincode) init_msg(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
