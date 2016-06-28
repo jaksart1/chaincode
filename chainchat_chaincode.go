@@ -63,11 +63,6 @@ func main() {
 // Init - reset all the things
 // ============================================================================================================================
 func (t *ChainchatChaincode) Init(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
-	
-	if len(args) != 1 {
-		return nil, errors.New("Incorrect number of arguments. Expecting 1")
-	}
-
 	if function == "init" {
 		err := stub.CreateTable("Receiver_Publickey", []*shim.ColumnDefinition{
 			{"MessageID", shim.ColumnDefinition_INT64, false},
