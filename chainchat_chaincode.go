@@ -170,21 +170,6 @@ func (t *ChainchatChaincode) writeMsg(stub *shim.ChaincodeStub, args []string) (
 		return nil, rowErr
 	}
 
-	row, getErr := stub.GetRow("messages", []shim.Column{shim.Column{Value: &shim.Column_String_{String_: recvPubKey}}})
-
-	if getErr != nil {
-		fmt.Println(fmt.Sprintf("[ERROR] Error in retrieving row during write: %s", getErr))
-	}
-
-	if &row == nil {
-		fmt.Println("[ERROR] Row is nil")
-	} else {
-		fmt.Println("[INFO2] Row is not nil")
-
-		fmt.Println(fmt.Sprintf("Row: %v", row))
-		fmt.Println(fmt.Sprintf("[INFO] The message: %s", t.readStringSafe(row.Columns[0])))
-	}
-
 	// Increment the message ID and store the updated one
 	msgID++
 	stub.PutState("counter", []byte(strconv.FormatUint(msgID, 10)))
