@@ -40,12 +40,22 @@ type MessageResults struct {
 }
 
 // Message stores a message and its related info
-type Message struct { // Message that gets added to blockchain
-	MessageID       int64  `json:"messageid"`
-	Message         string `json:"message"`
-	SenderPublicKey string `json:"senderpublickey"`
-	Time            string `json:"time"`
+type Message struct {
+	ReceiverPublicKey string `json:"recvPubKey"`
+	MessageID         uint64 `json:"messageID"`
+	Message           string `json:"message"`
+	SenderPublicKey   string `json:"senderPubKey"`
+	Timestamp         string `json:"timestamp"`
 }
+
+// Defines the index of each column in a row of the messages table
+const (
+	ReceiverPublicKeyCol = iota
+	MessageIDCol
+	MessageCol
+	SendPublicKeyCol
+	TimestampCol
+)
 
 // Main initializes the shim
 func main() {
@@ -61,11 +71,11 @@ func (t *ChainchatChaincode) Init(stub *shim.ChaincodeStub, function string, arg
 	if function == "init" {
 		// Create the table where all messages will be stored
 		err := stub.CreateTable("messages", []*shim.ColumnDefinition{
-			{"ReceiverPublicKey", shim.ColumnDefinition_STRING, true},
-			{"MessageID", shim.ColumnDefinition_UINT64, true},
-			{"Message", shim.ColumnDefinition_STRING, false},
-			{"SenderPublicKey", shim.ColumnDefinition_STRING, false},
-			{"Time", shim.ColumnDefinition_STRING, false},
+			&shim.ColumnDefinition{Name: "ReceiverPublicKey", Type: shim.ColumnDefinition_STRING, Key: true},
+			&shim.ColumnDefinition{Name: "MessageID", Type: shim.ColumnDefinition_UINT64, Key: true},
+			&shim.ColumnDefinition{Name: "Message", Type: shim.ColumnDefinition_STRING, Key: false},
+			&shim.ColumnDefinition{Name: "SenderPublicKey", Type: shim.ColumnDefinition_STRING, Key: false},
+			&shim.ColumnDefinition{Name: "Time", Type: shim.ColumnDefinition_STRING, Key: false},
 		})
 
 		// Handle table creation errors
@@ -188,33 +198,39 @@ func (t *ChainchatChaincode) readMsgs(stub *shim.ChaincodeStub, args []string) (
 	}
 
 	// Retrieve all the rows that are messages for the specified user
-	rows, rowErr := stub.GetRows("messages", []shim.Column{shim.Column{Value: &shim.Column_String_{String_: recvPubKey}}})
+	rowChan, rowErr := stub.GetRows("messages", []shim.Column{shim.Column{Value: &shim.Column_String_{String_: recvPubKey}}})
 	if rowErr != nil {
 		fmt.Println(fmt.Sprintf("[ERROR] Could not retrieve the rows: %s", rowErr))
 		return nil, rowErr
 	}
 
+	// Extract the rows
+	var rows []shim.Row
+	for row := range rowChan {
+		if len(row.Columns) != 0 {
+			rows = append(rows, row)
+			fmt.Println(fmt.Sprintf("[INFO] Row: %v", row))
+		}
+	}
+
 	// Parse the results into a message array
 	var messageResults []Message
+	for i := 0; i < len(rows); i++ {
+		currentRow := rows[i]
 
-	fmt.Println(fmt.Sprintf("[INFO] Receiver public key: " + recvPubKey))
-	fmt.Println(len(rows))
+		msg := Message{
+			ReceiverPublicKey: t.readStringSafe(currentRow.Columns[0]),
+			MessageID:         t.readUint64Safe(currentRow.Columns[1]),
+			Message:           t.readStringSafe(currentRow.Columns[2]),
+			SenderPublicKey:   t.readStringSafe(currentRow.Columns[3]),
+			Timestamp:         t.readStringSafe(currentRow.Columns[4]),
+		}
+		messageResults = append(messageResults, msg)
 
-	for index := 0; index < len(rows); index++ {
-		var currentRow = <-rows
-		strMsgID := t.readStringSafe(currentRow.Columns[0])
-
-		messageResults = append(messageResults, Message{
-			MessageID:       t.readInt64Safe(currentRow.Columns[0]),
-			Message:         t.readStringSafe(currentRow.Columns[1]),
-			SenderPublicKey: t.readStringSafe(currentRow.Columns[2]),
-			Time:            t.readStringSafe(currentRow.Columns[3]),
-		})
-
-		deleteErr := stub.DeleteRow("messages", []shim.Column{{&shim.Column_String_{String_: strMsgID}}})
+		deleteErr := stub.DeleteRow("messages", []shim.Column{{&shim.Column_String_{String_: msg.ReceiverPublicKey}}})
 
 		if deleteErr != nil {
-			fmt.Println(fmt.Sprintf("[ERROR] Could not delete message row for ID %s: %s", strMsgID, deleteErr))
+			fmt.Println(fmt.Sprintf("[ERROR] Could not delete message row for ID %d: %s", msg.MessageID, deleteErr))
 		}
 	}
 
@@ -235,6 +251,14 @@ func (t *ChainchatChaincode) readInt64Safe(col *shim.Column) int64 {
 	}
 
 	return col.GetInt64()
+}
+
+func (t *ChainchatChaincode) readUint64Safe(col *shim.Column) uint64 {
+	if col == nil {
+		return 0
+	}
+
+	return col.GetUint64()
 }
 
 func (t *ChainchatChaincode) readBoolSafe(col *shim.Column) bool {
