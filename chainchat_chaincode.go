@@ -23,9 +23,11 @@ package main
 
 import (
 	"encoding/json"
+	"strconv"
 	"errors"
 	"fmt"
-	"strconv"
+	"bytes"
+	"strings"
 
 	"github.com/hyperledger/fabric/core/chaincode/shim"
 )
@@ -36,25 +38,56 @@ type ChainchatChaincode struct {
 
 // MessageResults stores an array of retrieved messages
 type MessageResults struct {
-	Messages []Message `json:"messages"`
+	Messages	[]Message	`json:"messages"`
 }
 
 // Message stores a message and its related info
 type Message struct {
-	ReceiverPublicKey string `json:"recvPubKey"`
-	MessageID         uint64 `json:"messageID"`
-	Message           string `json:"message"`
-	SenderPublicKey   string `json:"senderPubKey"`
-	Timestamp         string `json:"timestamp"`
+	ID			uint64	`json:"id"`
+	ReceiverID	string 	`json:"recvID"`
+	SenderID	string 	`json:"senderID"`
+	Message		string 	`json:"message"`
+	Timestamp	string 	`json:"timestamp"`
 }
 
-// Defines the index of each column in a row of the messages table
+// Stores the index of each column in the messages table
 const (
-	ReceiverPublicKeyCol = iota
-	MessageIDCol
-	MessageCol
-	SendPublicKeyCol
-	TimestampCol
+	MsgCatchAllCol = iota
+	MsgReceiverIDCol
+	MsgIDCol
+	MsgCol
+)
+
+// User stores user information and its related info
+type User struct {
+	ID		string	`json:"id"`
+	Name	string	`json:"name"`
+	PubKey	string	`json:"pubKey"`
+	Room	string	`json:"room"`
+	Active	bool	`json:"active"`
+}
+
+// Stores the index of each column in the users table
+const (
+	UserCatchAllCol = iota
+	UserIDCol
+	UserCol
+)
+
+// Room stores the name and ID of a room
+type Room struct {
+	ID			string		`json:"id"`
+	Name		string		`json:"name"`
+	UsersIn		[]string	`json:"usersIn"`
+	CreatedBy	string		`json:"createdBy"`
+	CreatedOn	string		`json:"createdOn"`
+}
+
+// Stores the index of each column in the rooms table
+const (
+	RoomCatchAllCol = iota
+	RoomIDCol
+	RoomCol
 )
 
 // Main initializes the shim
@@ -65,176 +98,637 @@ func main() {
 	}
 }
 
-// Init creates the messages table and starts the ID counter to 0
+// Init prepares the ledger for the chat application
 func (t *ChainchatChaincode) Init(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
-
 	if function == "init" {
-		// Create the table where all messages will be stored
-		err := stub.CreateTable("messages", []*shim.ColumnDefinition{
-			&shim.ColumnDefinition{Name: "ReceiverPublicKey", Type: shim.ColumnDefinition_STRING, Key: true},
-			&shim.ColumnDefinition{Name: "MessageID", Type: shim.ColumnDefinition_UINT64, Key: true},
-			&shim.ColumnDefinition{Name: "Message", Type: shim.ColumnDefinition_STRING, Key: false},
-			&shim.ColumnDefinition{Name: "SenderPublicKey", Type: shim.ColumnDefinition_STRING, Key: false},
-			&shim.ColumnDefinition{Name: "Time", Type: shim.ColumnDefinition_STRING, Key: false},
+		if len(args) < 1 {
+			fmt.Println("[ERROR] Not enough arguments to initialize chaincode, need at least 1")
+			return nil, errors.New("Unexpected number of arguments. Need 1 to create the initial room")
+		}
+
+		// Create the table where all user structs will be stored
+		userTableErr := stub.CreateTable("users", []*shim.ColumnDefinition{
+			&shim.ColumnDefinition{Name: "CatchAll", Type: shim.ColumnDefinition_STRING, Key: true},
+			&shim.ColumnDefinition{Name: "ID", Type: shim.ColumnDefinition_STRING, Key: true},
+			&shim.ColumnDefinition{Name: "User", Type: shim.ColumnDefinition_BYTES, Key: false},
 		})
 
 		// Handle table creation errors
-		if err != nil {
-			fmt.Println(fmt.Sprintf("[ERROR] Could not create messages table: %s", err))
-			return nil, err
+		if userTableErr != nil {
+			fmt.Println(fmt.Sprintf("[ERROR] Could not create users table: %s", userTableErr.Error()))
+			return nil, userTableErr
+		}
+
+		// Create the table where all room structs will be stored
+		roomTableErr := stub.CreateTable("rooms", []*shim.ColumnDefinition{
+			&shim.ColumnDefinition{Name: "CatchAll", Type: shim.ColumnDefinition_STRING, Key: true},
+			&shim.ColumnDefinition{Name: "ID", Type: shim.ColumnDefinition_STRING, Key: true},
+			&shim.ColumnDefinition{Name: "Room", Type: shim.ColumnDefinition_BYTES, Key: false},
+		})
+
+		// Handle table creation errors
+		if roomTableErr != nil {
+			fmt.Println(fmt.Sprintf("[ERROR] Could not create rooms table: %s", roomTableErr.Error()))
+			return nil, roomTableErr
+		}
+
+		// Create the table where all messages will be stored
+		messageTableErr := stub.CreateTable("messages", []*shim.ColumnDefinition{
+			&shim.ColumnDefinition{Name: "CatchAll", Type: shim.ColumnDefinition_STRING, Key: true},
+			&shim.ColumnDefinition{Name: "ReceiverID", Type: shim.ColumnDefinition_STRING, Key: true},
+			&shim.ColumnDefinition{Name: "ID", Type: shim.ColumnDefinition_UINT64, Key: true},
+			&shim.ColumnDefinition{Name: "Message", Type: shim.ColumnDefinition_BYTES, Key: false},
+		})
+
+		// Handle table creation errors
+		if messageTableErr != nil {
+			fmt.Println(fmt.Sprintf("[ERROR] Could not create messages table: %s", messageTableErr.Error()))
+			return nil, messageTableErr
 		}
 
 		// Initialize the message counter to 0
-		err = stub.PutState("counter", []byte("0"))
+		counterErr := stub.PutState("counter", []byte("0"))
 
 		// Handle counter state initialization errors
-		if err != nil {
-			fmt.Println(fmt.Sprintf("[ERROR] Could not initialize message counter to 0: %s", err))
-			return nil, err
+		if counterErr != nil {
+			fmt.Println(fmt.Sprintf("[ERROR] Could not initialize message counter to 0: %s", counterErr))
+			return nil, counterErr
 		}
 	}
 
 	return nil, nil
 }
 
-// Invoke is the entry point for invocations, and handles initializing and read messages from the ledger
+// Invoke handles all chat functions which are saved to the blockchain
 func (t *ChainchatChaincode) Invoke(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
-	// Handle the different invocations
-
-	// Initialize the chaincode state, used as reset
 	if function == "init" {
-		return t.Init(stub, "init", args)
-	} else if function == "deleteMsg" { // Deletes a message from the ledger
-		return t.deleteMsg(stub, args)
-	} else if function == "writeMsg" { // Add a message to the ledger
-		return t.writeMsg(stub, args)
+		// Initialize the chaincode state, used as reset
+		return t.Init(stub, function, args)
+	} else if function == "writeMsg" {
+		// Write the message to the ledger for eventual retrieval by the receiver
+		return nil, t.WriteMessage(stub, args)
+	} else if function == "deleteMsgs" {
+		// Deletes the specified messages received by the specified user
+		return nil, t.DeleteMessages(stub, args)
+	} else if function == "createRoom" {
+		// Creates a new room
+		return nil, t.CreateRoom(stub, args)
+	} else if function == "deleteRoom" {
+		// Removes all users from the room and deletes it
+		return nil, t.SafelyDeleteRoom(stub, args)
+	} else if function == "removeUserFromRoom" {
+		// Adds the given user to the specified room
+		return nil, t.SafelyRemoveUserFromRoom(stub, args)
+	} else if function == "addUserToRoom" {
+		// Removes the given user from the specified room
+		return nil, t.SafelyAddUserToRoom(stub, args)
 	}
+	// else if function == "addUser" {
+	// 	// Adds a user to the ledger
+	// 	return t.AddUser(stub, args)
+	// } else if function == "deleteUser" {
+	// 	// Deletes a user from the ledger
+	// 	return t.DeleteUser(stub, args)
+	// }
 
 	// The requested invoke function was not recognized
-	fmt.Println(fmt.Sprintf("[ERROR] Did not recognize the function to invoke: %s", function))
-
-	return nil, errors.New("Received unknown function invocation")
+	errStr := fmt.Sprintf("[ERROR] Did not recognize invocation: %s", function)
+	fmt.Println(errStr)
+	return nil, errors.New(errStr)
 }
 
-// deleteMsg accepts a message ID and deletes it from the ledger
-func (t *ChainchatChaincode) deleteMsg(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
-	if len(args) != 1 {
-		return nil, errors.New("Incorrect number of arguments. Expecting 1")
+// Takes the 4 components of a message from the args array and writes it to the ledger
+// args[0] = Receiver's user ID
+// args[1] = Sender's user ID
+// args[2] = The message contents
+// args[3] = A UNIX-style UTC timestamp
+func (t *ChainchatChaincode) WriteMessage(stub *shim.ChaincodeStub, args []string) error {
+	// Check we have the requisite info
+	if len(args) < 4 {
+		errStr := fmt.Sprintf("[ERROR] Not enough arguments to write a message, expected 4 got %d", len(args))
+		fmt.Println(errStr)
+		return errors.New(errStr)
 	}
 
-	err := stub.DeleteTable("Receiver_PublicKey") //removes message associated table from chain state
-
-	if err != nil {
-		fmt.Printf("Error deleting table: %s", err)
+	// Build the message struct out
+	id, idErr := t.getAndIncrementMsgCounter(stub)
+	if idErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not get and increment the message counter: %s", idErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
 	}
 
-	return nil, nil
-}
+	recvID := args[0]
+	sendID := args[1]
+	msgContent := args[2]
+	timestamp := args[3]
 
-// writeMsg stores a new message on the ledger
-// args[0] - Message
-// args[1] - SenderPublicKey
-// args[2] - Time
-// args[3] - Receiver_PublicKey
-func (t *ChainchatChaincode) writeMsg(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
-	var msgID uint64      // The message's unique ID
-	msg := args[0]        // The message itself
-	sendPubKey := args[1] // The sender's public key
-	recvPubKey := args[3] // The receiver's public key
-	timestamp := args[2]  // The message's timestamp
-
-	// Check that we have the write number of args
-	if len(args) != 4 {
-		fmt.Println(fmt.Sprintf("[ERROR] Expected 4 arguments but got %v", len(args)))
-		return nil, errors.New("Incorrect number of arguments. Expecting 4")
+	msg := Message{
+		ID: id,
+		ReceiverID: recvID,
+		SenderID: sendID,
+		Message: msgContent,
+		Timestamp: timestamp,
 	}
 
-	// Retrieve the message ID and parse it as a number
-	byteID, err := stub.GetState("counter")
-	if err != nil {
-		fmt.Println(fmt.Sprintf("[ERROR] Could not retrieve the message's ID: %s", err))
-		return nil, err
-	}
-	strID := string(byteID[:])
-	msgID, err = strconv.ParseUint(strID, 10, 64)
-	if err != nil {
-		fmt.Println(fmt.Sprintf("[ERROR] Could not parse the message ID to a number: %s", err))
-		return nil, err
+	// Prepare the message struct for storage by marshalling it into bytes
+	msgBytes, marshalErr := json.Marshal(msg)
+	if marshalErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not marshal message into bytes: %s", marshalErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
 	}
 
-	fmt.Println(fmt.Sprintf("[INFO] Receiver public key: " + recvPubKey))
-
-	// Attempt to add a row for the message
+	// Write the message to the ledger
 	rowAdded, rowErr := stub.InsertRow("messages", shim.Row{
 		Columns: []*shim.Column{
-			{&shim.Column_String_{String_: recvPubKey}},
-			{&shim.Column_Uint64{Uint64: msgID}},
-			{&shim.Column_String_{String_: msg}},
-			{&shim.Column_String_{String_: sendPubKey}},
-			{&shim.Column_String_{String_: timestamp}},
+			{&shim.Column_String_{String_: "message"}},
+			{&shim.Column_String_{String_: recvID}},
+			{&shim.Column_Uint64{Uint64: id}},
+			{&shim.Column_Bytes{Bytes: msgBytes}},
 		},
 	})
 
+	// Handle error adding the message to the ledger
 	if rowErr != nil || !rowAdded {
-		fmt.Println(fmt.Sprintf("[ERROR] Could not insert a message into the ledger: %s", rowErr))
-		return nil, rowErr
+		errStr := fmt.Sprintf("[ERROR] Could not add message to the ledger: %s", rowErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
 	}
 
-	// Increment the message ID and store the updated one
-	msgID++
-	stub.PutState("counter", []byte(strconv.FormatUint(msgID, 10)))
-	return nil, nil
+	return nil
 }
 
-// readMsgs accepts a receiver's public key and returns all the messages destined for that receiver
-func (t *ChainchatChaincode) readMsgs(stub *shim.ChaincodeStub, args []string) ([]Message, error) {
-	// The public key we're getting messages for
-	recvPubKey := args[0]
-
-	// Error out if not enough arguments
-	if len(args) != 1 {
-		fmt.Println(fmt.Sprintf("[ERROR] Expected one argument but got: %v", len(args)))
-		return nil, errors.New("Incorrect number of arguments. Expecting 1")
+// DeleteMessages deletes all messages sent to a particular user with the given IDs
+// args[0] = Receiver ID
+// args[1..] = The ID of each message to delete
+func (t *ChainchatChaincode) DeleteMessages(stub *shim.ChaincodeStub, args []string) error {
+	// Make sure we have enough info to delete some messages
+	if len(args) < 2 {
+		errStr := fmt.Sprintf("[ERROR] Need at least 2 arguments to delete messages, received %d", len(args))
+		fmt.Println(errStr)
+		return errors.New(errStr)
 	}
 
-	// Retrieve all the rows that are messages for the specified user
-	rowChan, rowErr := stub.GetRows("messages", []shim.Column{shim.Column{Value: &shim.Column_String_{String_: recvPubKey}}})
-	if rowErr != nil {
-		fmt.Println(fmt.Sprintf("[ERROR] Could not retrieve the rows: %s", rowErr))
-		return nil, rowErr
-	}
+	// Retrieve the receiver ID of the messages to delete
+	recvID := args[0]
 
-	// Extract the rows
-	var rows []shim.Row
-	for row := range rowChan {
-		if len(row.Columns) != 0 {
-			rows = append(rows, row)
-			fmt.Println(fmt.Sprintf("[INFO] Row: %v", row))
+	// Iterate through each message ID deleting each one
+	for i := 1; i < len(args); i++ {
+		// Get the message ID as a string from the args array and convert it to a uint64
+		msgIDStr := args[i]
+		msgID, convErr := strconv.ParseUint(msgIDStr, 10, 64)
+
+		// If conversion succeeded delete the message, otherwise indicate failure for that message
+		if convErr != nil {
+			fmt.Printf(fmt.Sprintf("[ERROR] Could not convert message ID %s to a number for deletion", msgIDStr))
+		} else {
+			delErr := stub.DeleteRow("messages", []shim.Column{
+				shim.Column{Value: &shim.Column_String_{String_: "message"}},
+				shim.Column{Value: &shim.Column_String_{String_: recvID}},
+				shim.Column{Value: &shim.Column_Uint64{Uint64: msgID}},
+			})
+
+			if delErr != nil {
+				fmt.Printf("[ERROR] Error deleting row: %s", delErr)
+			}
 		}
 	}
 
-	// Parse the results into a message array
-	var messageResults []Message
-	for i := 0; i < len(rows); i++ {
-		currentRow := rows[i]
+	return nil
+}
 
-		msg := Message{
-			ReceiverPublicKey: t.readStringSafe(currentRow.Columns[0]),
-			MessageID:         t.readUint64Safe(currentRow.Columns[1]),
-			Message:           t.readStringSafe(currentRow.Columns[2]),
-			SenderPublicKey:   t.readStringSafe(currentRow.Columns[3]),
-			Timestamp:         t.readStringSafe(currentRow.Columns[4]),
-		}
-		messageResults = append(messageResults, msg)
+// CreateRoom adds a new room to the ledger using the given info
+// args[0] = Unique ID of the room
+// args[1] = Display name of the room
+// args[2] = User ID of the room's creator
+// args[3] = UNIX-style UTC timestamp when the room was created
+func (t *ChainchatChaincode) CreateRoom(stub *shim.ChaincodeStub, args []string) error {
+	// Make sure we have enough info to create a room
+	if len(args) < 4 {
+		errStr := fmt.Sprintf("[ERROR] Expected 4 arguments to create a room, received %d", len(args))
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
 
-		deleteErr := stub.DeleteRow("messages", []shim.Column{{&shim.Column_String_{String_: msg.ReceiverPublicKey}}})
+	// Extract room info from the arguments rarray
+	roomID := args[0]
+	roomName := args[1]
+	creator := args[2]
+	timestamp := args[3]
 
-		if deleteErr != nil {
-			fmt.Println(fmt.Sprintf("[ERROR] Could not delete message row for ID %d: %s", msg.MessageID, deleteErr))
+	// Create the room struct
+	newRoom := Room{
+		ID: roomID,
+		Name: roomName,
+		UsersIn: []string{},
+		CreatedBy: creator,
+		CreatedOn: timestamp,
+	}
+
+	// Marshal the struct into bytes for storage to the ledger
+	roomBytes, marshalErr := json.Marshal(newRoom)
+	if marshalErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not marshal the room into bytes for storage: %s", marshalErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Add the new room to the ledger
+	rowAdded, rowErr := stub.InsertRow("rooms", shim.Row{
+		Columns: []*shim.Column{
+			{&shim.Column_String_{String_: "room"}},
+			{&shim.Column_String_{String_: roomID}},
+			{&shim.Column_Bytes{Bytes: roomBytes}},
+		},
+	})
+
+	// Handle error adding the message to the ledger
+	if rowErr != nil || !rowAdded {
+		errStr := fmt.Sprintf("[ERROR] Could not add room to the ledger: %s", rowErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	return nil
+}
+
+// SafelyDeleteRoom disassociates all users from the given room and then deletes the room from the ledger
+// args[0] = The room ID to delete
+func (t *ChainchatChaincode) SafelyDeleteRoom(stub *shim.ChaincodeStub, args []string) error {
+	// Make sure we have the ID of the room to delete
+	if len(args) < 1 {
+		errStr := fmt.Sprintf("[ERROR] Expected 1 argument to delete a room, received %d", len(args))
+		fmt.Printf(errStr)
+		return errors.New(errStr)
+	}
+
+	// Extract the room to delete from the arguments
+	roomID := args[0]
+
+	// Get the room from the ledger
+	room, roomErr := t.getRoom(stub, roomID)
+	if roomErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not get room: %s", roomErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Update the users in the room and catch problem users along the way
+	var errorArr []error
+	for i := 0; i < len(room.UsersIn); i++ {
+		// Extract the user ID
+		userID := room.UsersIn[i]
+
+		// Update the given user's room to be blank
+		updateErr := t.updateUserRoom(stub, userID, "")
+		if updateErr != nil {
+			errStr := fmt.Sprintf("Could not update user's room: %s", updateErr.Error())
+			errorArr = append(errorArr, errors.New(errStr))
 		}
 	}
 
-	return messageResults, nil
+	// If there were errors deleting users from their room, do not go through removing the room from the ledger
+	if len(errorArr) > 0 {
+		var updateUsersErrs bytes.Buffer
+		updateUsersErrs.WriteString("[ERROR] Encountered the following issues while removing users from their room:\n")
+		for j := 0; j < len(errorArr); j++ {
+			currErr := errorArr[j]
+			updateUsersErrs.WriteString(fmt.Sprintf("\t%s\n", currErr.Error()))
+		}
+
+		fmt.Println(updateUsersErrs.String())
+		return errors.New(updateUsersErrs.String())
+	}
+
+	// Assuming no errors, let's now delete the room from the ledger
+	deleteErr := t.deleteRoom(stub, roomID)
+	if deleteErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not delete room %s: %s", roomID, deleteErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	return nil
+}
+
+// Safely removes a user from a room by updating both the user's record and the room's record
+// args[0] = The user ID who is going to be removed from the room
+func (t *ChainchatChaincode) SafelyRemoveUserFromRoom(stub *shim.ChaincodeStub, args []string) error {
+	// Error if we don't have the right info
+	if len(args) < 1 {
+		errStr := fmt.Sprintf("[ERROR] Expected at least 1 argument to remove user from a room, received %d", len(args))
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Extract info from arguments array
+	userID := args[0]
+
+	// Get the user from the ledger
+	user, userErr := t.getUser(stub, userID)
+	if userErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Unable to retrieve user %s to move to room %s: %s", userID, roomID, userErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Extract the user's current room and remove the user from that room
+	roomID := user.Room
+	removeFromRoomErr := t.removeUserFromRoom(stub, userID, roomID)
+	if removeFromRoomErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not remove a user from the room record: %s", removeFromRoomErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Update the room the user is currently in, setting it to be blank
+	updateUserErr := t.updateUserRoom(stub, userID, "")
+	if updateUserErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not update user's room record: %s", updateUserErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	return nil
+}
+
+// Safely adds a user to a room by updating both the user's record and the room's record
+// args[0] = The user ID who is going to be added to a room
+// args[1] = The room to add the user to
+func (t *ChainchatChaincode) SafelyAddUserToRoom(stub *shim.ChaincodeStub, userID string, roomID string) error {
+	
+}
+
+// Removes a user from a room's list of users
+func (t *ChainchatChaincode) removeUserFromRoom(stub *shim.ChaincodeStub, userID string, roomID string) error {
+	// Get the room
+	room, roomErr := t.getRoom(stub, roomID)
+	if roomErr != nil {
+		return roomErr
+	}
+
+	// Remove the given user ID from the users array
+	usersArr := room.UsersIn
+	index := indexOf(usersArr, userID)
+    usersArr[len(usersArr) - 1], usersArr[index] = usersArr[index], usersArr[len(usersArr) - 1]
+    usersArr = usersArr[:len(usersArr) - 1]
+
+    // Set the users array
+    room.UsersIn = usersArr
+
+    // Update the room in the ledger
+    roomReplaceErr := t.replaceRoom(stub, room)
+    if roomReplaceErr != nil {
+    	return roomReplaceErr
+    }
+
+    return nil
+}
+
+// Adds a user to a room's list of users
+func (t *ChainchatChaincode) addUserToRoom(stub *shim.ChaincodeStub, userID string, roomID string) error {
+	// Get the room
+	room, roomErr := t.getRoom(stub, roomID)
+	if roomErr != nil {
+		return roomErr
+	}
+
+	// Add the user to the room's user array
+	usersArr := room.UsersIn
+	usersArr = append(usersArr, userID)
+	room.UsersIn = usersArr
+
+	// Update the room in the ledger
+	roomReplaceErr := t.replaceRoom(stub, room)
+	if roomReplaceErr != nil {
+		return roomReplaceErr
+	}
+
+	return nil
+}
+
+// Removes a room from the ledger
+func (t *ChainchatChaincode) deleteRoom(stub *shim.ChaincodeStub, roomID string) error {
+	return stub.DeleteRow("rooms", []shim.Column{
+		{&shim.Column_String_{String_: "room"}},
+		{&shim.Column_String_{String_: roomID}},
+	})
+}
+
+// Updates the specified user to be in the specified room
+func (t *ChainchatChaincode) updateUserRoom(stub *shim.ChaincodeStub, userID string, roomID string) error {
+	// Retrieve the specified user
+	user, userErr := t.getUser(stub, userID)
+	if userErr != nil {
+		return userErr
+	}
+
+	// Update the user's room
+	user.Room = roomID
+
+	// Update the user in the ledger
+	updateErr := t.replaceUser(stub, user)
+	if updateErr != nil {
+		return updateErr
+	}
+
+	return nil
+}
+
+// Replaces the room in the table with the given room
+func (t *ChainchatChaincode) replaceRoom(stub *shim.ChaincodeStub, room Room) error {
+	// Convert the room into bytes for storage
+	roomBytes, marshalErr := json.Marshal(room)
+	if marshalErr != nil {
+		errStr := fmt.Sprintf("Could not marshal room %s into bytes: %s", room.ID, marshalErr.Error())
+		return errors.New(errStr)
+	}
+
+	// Attemt to replace the room in the ledger
+	roomReplaced, replaceErr := stub.ReplaceRow("rooms", shim.Row{
+		Columns: []*shim.Column{
+			{&shim.Column_String_{String_: "room"}},
+			{&shim.Column_String_{String_: room.ID}},
+			{&shim.Column_Bytes{Bytes: roomBytes}},
+		},
+	})
+
+	// Handle ledger errors
+	if replaceErr != nil {
+		errStr := fmt.Sprintf("Could not replace room %s: %s", room.ID, replaceErr.Error())
+		return errors.New(errStr)
+	}
+
+	// Handle room not found error
+	if !roomReplaced {
+		errStr := fmt.Sprintf("Could not replace room %s: room does not exist", room.ID)
+		return errors.New(errStr)
+	}
+
+	return nil
+}
+
+// Replaces the user in the table with the given user
+func (t *ChainchatChaincode) replaceUser(stub *shim.ChaincodeStub, user User) error {
+	// Convert the user into bytes for storage
+	userBytes, marshalErr := json.Marshal(user)
+	if marshalErr != nil {
+		errStr := fmt.Sprintf("Could not marshal user %s into bytes: %s", user.ID, marshalErr.Error())
+		return errors.New(errStr)
+	}
+
+	// Attempt to replace the user in the ledger
+	userReplaced, replaceErr := stub.ReplaceRow("users", shim.Row{
+		Columns: []*shim.Column{
+			{&shim.Column_String_{String_: "user"}},
+			{&shim.Column_String_{String_: user.ID}},
+			{&shim.Column_Bytes{Bytes: userBytes}},
+		},
+	})
+
+	if replaceErr != nil {
+		errStr := fmt.Sprintf("Could not replace user %s: %s", user.ID, replaceErr.Error())
+		return errors.New(errStr)
+	}
+
+	if !userReplaced {
+		errStr := fmt.Sprintf("Could not replacer user %s: no such user exists")
+		return errors.New(errStr)
+	}
+
+	return nil
+}
+
+// Retrieves one or more users from the ledges and processes them into an array of structs
+// Returns as many users as possible, with errors in the error array for each failed retrieval
+// func (t *ChainchatChaincode) getUsers(stub *shim.ChaincodeStub, userIDs []string) ([]User, []error) {
+// 	// Check we're getting at least one user
+// 	if len(userIDs) < 1 {
+// 		errStr := fmt.Sprintf("Expected at least one user, got %d", len(userIDs))
+// 		return nil, []error{errors.New(errStr)}
+// 	}
+
+// 	// Retrieve all the users and add to the array
+// 	var users []User
+// 	var errors []error
+// 	for i := 0; i < len(userIDs); i++ {
+// 		// Extract the user ID to retrieve
+// 		userID := userIDs[i]
+
+// 		// Attempt to get the user
+// 		user, userErr := t.getUser(stub, userID)
+
+// 		// Process failure and success
+// 		if userErr != nil {
+// 			errors = append(errors, userErr)
+// 		} else {
+// 			users = append(users, user)
+// 		}
+// 	}
+
+// 	// If there were no errors just return nil for errors, otherwise return the errors with the users
+// 	if len(errors) == 0 {
+// 		return users, nil
+// 	} else {
+// 		return users, errors
+// 	}
+// }
+
+// Retrieves a single user from the ledger and processes it into a struct
+func (t *ChainchatChaincode) getUser(stub *shim.ChaincodeStub, userID string) (User, error) {
+	// Retrieve the user from the ledger
+	userRow, userRowErr := stub.GetRow("users", []shim.Column{
+		shim.Column{Value: &shim.Column_String_{String_: "user"}},
+		shim.Column{Value: &shim.Column_String_{String_: userID}},
+	})
+
+	// Handle retrieval errors
+	if userRowErr != nil {
+		errStr := fmt.Sprintf("Could not retrieve user %s from ledger: %s", userID, userRowErr.Error())
+		return User{}, errors.New(errStr)
+	}
+
+	// Handle not finding the user
+	if len(userRow.Columns) == 0 {
+		errStr := fmt.Sprintf("Could not find user %s", userID)
+		return User{}, errors.New(errStr)
+	}
+
+	user := User{}
+	userBytes := t.readBytesSafe(userRow.Columns[UserCol])
+	unmarshalErr := json.Unmarshal(userBytes, &user)
+	if unmarshalErr != nil {
+		errStr := fmt.Sprintf("Could not unmarshal user %s: %s", userID, unmarshalErr.Error())
+		return User{}, errors.New(errStr)
+	}
+
+	return user, nil
+}
+
+// Retrieves a particular room from the ledger and processes it into a struct
+func (t *ChainchatChaincode) getRoom(stub *shim.ChaincodeStub, roomID string) (Room, error) {
+	// Retrieve the room
+	roomRow, roomRowErr := stub.GetRow("rooms", []shim.Column{
+		shim.Column{Value: &shim.Column_String_{String_: "room"}},
+		shim.Column{Value: &shim.Column_String_{String_: roomID}},
+	})
+
+	// Handle row retrieval errors
+	if roomRowErr != nil {
+		errStr := fmt.Sprintf("Could not retrieve the room with ID %s to delete: %s", roomID, roomRowErr.Error())
+		return Room{}, errors.New(errStr)
+	}
+
+	// Handle unknown room
+	if len(roomRow.Columns) == 0 {
+		errStr := fmt.Sprintf("Could not find room %s to delete", roomID)
+		return Room{}, errors.New(errStr)
+	}
+
+	// Turn the room back into a struct
+	room := Room{}
+	roomBytes := t.readBytesSafe(roomRow.Columns[RoomCol])
+	unmarshalErr := json.Unmarshal(roomBytes, &room)
+	if unmarshalErr != nil {
+		errStr := fmt.Sprintf("Could not unmarshal bytes into a room: %s", unmarshalErr.Error())
+		return Room{}, errors.New(errStr)
+	}
+
+	return room, nil
+}
+
+func (t *ChainchatChaincode) getAndIncrementMsgCounter(stub *shim.ChaincodeStub) (uint64, error) {
+	// Retrieve the counter value from the ledger
+	counterByte, getErr := stub.GetState("counter")
+	if getErr != nil {
+		errStr := fmt.Sprintf("Could not retrieve the message counter: %s", getErr.Error())
+		return 0, errors.New(errStr)
+	}
+
+	// Convert the counter value to a number
+	counterStr := string(counterByte[:])
+	counter, parseErr := strconv.ParseUint(counterStr, 10, 64)
+	if parseErr != nil {
+		errStr := fmt.Sprintf("Could not parse counter into a number: %s", parseErr.Error())
+		return 0, errors.New(errStr)
+	}
+
+	// Increment and store the incremented value
+	counterInc := counter + 1
+	putErr := stub.PutState("counter", []byte(strconv.FormatUint(counterInc, 10)))
+	if putErr != nil {
+		errStr := fmt.Sprintf("Could not store the incremented counter value: %s", putErr.Error())
+		return 0, errors.New(errStr)
+	}
+
+	return counter, nil
+}
+
+// Query handles querying for chats to a certain user
+func (t *ChainchatChaincode) Query(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
+	fmt.Println(fmt.Sprintf("[ERROR] Did not recognize query: %s", function))
+	return nil, errors.New("Received unknown function query")
 }
 
 func (t *ChainchatChaincode) readStringSafe(col *shim.Column) string {
@@ -269,31 +763,22 @@ func (t *ChainchatChaincode) readBoolSafe(col *shim.Column) bool {
 	return col.GetBool()
 }
 
-// Query queries the chainstate
-func (t *ChainchatChaincode) Query(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
-	if function == "readMsgs" { // Retrieves all messages for a particular user
-		messageResults, readErr := t.readMsgs(stub, args)
-
-		// Handle retrieval errors
-		if readErr != nil {
-			fmt.Println(fmt.Sprintf("[ERROR] There was an error in reading the messages: %s", readErr.Error()))
-			return nil, readErr
-		}
-
-		// Marshal the messages into a JSON string
-		converted, marshalErr := json.Marshal(MessageResults{messageResults})
-
-		// Handle marshalling errors
-		if marshalErr != nil {
-			fmt.Println(fmt.Sprintf("[ERROR] There was a marshalling error: %s", marshalErr.Error()))
-			return nil, marshalErr
-		}
-
-		fmt.Println(converted)
-
-		return converted, nil
+func (t *ChainchatChaincode) readBytesSafe(col *shim.Column) []byte {
+	if col == nil {
+		return []byte{}
 	}
 
-	fmt.Println("[ERROR] Query did not find func " + function) //error
-	return nil, errors.New("Received unknown function query")
+	return col.GetBytes()
+}
+
+// Finds the index of a particular string in an array of strings
+// Returns -1 if no such string was found
+func indexOf(arr []string, elem string) int {
+	for i := 0; i < len(arr); i++ {
+		if strings.Compare(arr[i], elem) == 0 {
+			return i
+		}
+	}
+
+	return -1
 }
