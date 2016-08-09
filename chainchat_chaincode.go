@@ -182,14 +182,13 @@ func (t *ChainchatChaincode) Invoke(stub *shim.ChaincodeStub, function string, a
 	} else if function == "addUserToRoom" {
 		// Removes the given user from the specified room
 		return nil, t.SafelyAddUserToRoom(stub, args)
+	} else if function == "addUser" {
+		// Adds a user to the ledger
+		return nil, t.AddUser(stub, args)
+	} else if function == "deleteUser" {
+		// Deletes a user from the ledger
+		return nil, t.DeleteUser(stub, args)
 	}
-	// else if function == "addUser" {
-	// 	// Adds a user to the ledger
-	// 	return t.AddUser(stub, args)
-	// } else if function == "deleteUser" {
-	// 	// Deletes a user from the ledger
-	// 	return t.DeleteUser(stub, args)
-	// }
 
 	// The requested invoke function was not recognized
 	errStr := fmt.Sprintf("[ERROR] Did not recognize invocation: %s", function)
@@ -428,7 +427,7 @@ func (t *ChainchatChaincode) SafelyRemoveUserFromRoom(stub *shim.ChaincodeStub, 
 	// Get the user from the ledger
 	user, userErr := t.getUser(stub, userID)
 	if userErr != nil {
-		errStr := fmt.Sprintf("[ERROR] Unable to retrieve user %s to move to room %s: %s", userID, roomID, userErr.Error())
+		errStr := fmt.Sprintf("[ERROR] Unable to retrieve user %s: %s", userID, userErr.Error())
 		fmt.Println(errStr)
 		return errors.New(errStr)
 	}
@@ -456,8 +455,156 @@ func (t *ChainchatChaincode) SafelyRemoveUserFromRoom(stub *shim.ChaincodeStub, 
 // Safely adds a user to a room by updating both the user's record and the room's record
 // args[0] = The user ID who is going to be added to a room
 // args[1] = The room to add the user to
-func (t *ChainchatChaincode) SafelyAddUserToRoom(stub *shim.ChaincodeStub, userID string, roomID string) error {
-	
+func (t *ChainchatChaincode) SafelyAddUserToRoom(stub *shim.ChaincodeStub, args []string) error {
+	// Check correct number of arguments
+	if len(args) < 2 {
+		errStr := fmt.Sprintf("[ERROR] Expected 2 arguments to add a user to a room, received %d", len(args))
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Extract info from args array
+	userID := args[0]
+	roomID := args[1]
+
+	updateUserErr := t.updateUserRoom(stub, userID, roomID)
+	if updateUserErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Unable to change room of user %s: %s", userID, updateUserErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Update the room
+	roomUpdateErr := t.addUserToRoom(stub, userID, roomID)
+	if roomUpdateErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Unable to add user %s to room %s: %s", userID, roomID, roomUpdateErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	return nil
+}
+
+// Adds a new user to the ledger
+// args[0] = User's ID
+// args[1] = User's name
+// args[2] = User's public key
+// args[3] = User's room
+// args[4] = Empty string if the user is logged out, any string if the user is logged in
+func (t *ChainchatChaincode) AddUser(stub *shim.ChaincodeStub, args []string) error {
+	// Make sure we have the right number of arguments
+	if len(args) < 5 {
+		errStr := fmt.Sprintf("[ERROR] Expected 5 arguments to create a new user, received %d", len(args))
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Extract information from arguments array
+	userID := args[0]
+	userName := args[1]
+	userPubKey := args[2]
+	userRoom := args[3]
+	userActive := len(args[4]) > 0
+
+	// Build the user struct
+	user := User{
+		ID: userID,
+		Name: userName,
+		PubKey: userPubKey,
+		Room: userRoom,
+		Active: userActive,
+	}
+
+	// Marshal the user into bytes for storage
+	userBytes, marshalErr := json.Marshal(user)
+	if marshalErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not marshal new user %s into bytes for storage: %s", userID, marshalErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Add the user to the user's table
+	rowAdded, rowErr := stub.InsertRow("users", shim.Row{
+		Columns: []*shim.Column{
+			{&shim.Column_String_{String_: "user"}},
+			{&shim.Column_String_{String_: userID}},
+			{&shim.Column_Bytes{Bytes: userBytes}},
+		},
+	})
+
+	// Deal with ledger errors
+	if rowErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not add user %s to user's table: %s", userID, rowErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Deal with user already exists error
+	if !rowAdded {
+		errStr := fmt.Sprintf("[ERROR] A user with ID %s already exists, cannot add to table", userID)
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// If a room was given, add the user to the rooms table
+	if len(userRoom) > 0 {
+		roomErr := t.addUserToRoom(stub, userID, userRoom)
+		if roomErr != nil {
+			errStr := fmt.Sprintf("[ERROR] Could not add new user %s to given room: %s", userID, roomErr.Error())
+			fmt.Println(errStr)
+			return errors.New(errStr)
+		}
+	}
+
+	return nil
+}
+
+// Removes a user from the ledger and updates the room ledger
+// args[0] = The user ID to remove
+func (t *ChainchatChaincode) DeleteUser(stub *shim.ChaincodeStub, args []string) error {
+	// Make sure we have the right number of arguments
+	if len(args) < 1 {
+		errStr := fmt.Sprintf("[ERROR] Expected at least 1 argument to delete a user, received %d", len(args))
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Extract information from arguments array
+	userID := args[0]
+
+	// Get the user from the ledger
+	user, userErr := t.getUser(stub, userID)
+	if userErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not retrieve user %s from the ledger: %s", userID, userErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Extract the user's room
+	roomID := user.Room
+
+	// Remove the user from the ledger
+	deleteErr := stub.DeleteRow("rooms", []shim.Column{
+		{&shim.Column_String_{String_: "room"}},
+		{&shim.Column_String_{String_: roomID}},
+	})
+
+	// Deal with deletion errors
+	if deleteErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not remove user %s from ledger: %s", userID, deleteErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	// Remove the user from the room ledger
+	roomErr := t.removeUserFromRoom(stub, userID, roomID)
+	if roomErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not remove user %s from room %s: %s", userID, roomID, roomErr.Error())
+		fmt.Println(errStr)
+		return errors.New(errStr)
+	}
+
+	return nil
 }
 
 // Removes a user from a room's list of users
