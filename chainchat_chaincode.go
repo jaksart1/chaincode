@@ -46,6 +46,7 @@ type Message struct {
 	ID			uint64	`json:"id"`
 	ReceiverID	string 	`json:"recvID"`
 	SenderID	string 	`json:"senderID"`
+	ToRoom		bool	`json:"toRoom"`
 	Message		string 	`json:"message"`
 	Timestamp	string 	`json:"timestamp"`
 }
@@ -199,8 +200,9 @@ func (t *ChainchatChaincode) Invoke(stub *shim.ChaincodeStub, function string, a
 // Takes the 4 components of a message from the args array and writes it to the ledger
 // args[0] = Receiver's user ID
 // args[1] = Sender's user ID
-// args[2] = The message contents
-// args[3] = A UNIX-style UTC timestamp
+// args[2] = "true" if the receiver ID a room's ID, anything else if the ID is a user ID
+// args[3] = The message contents
+// args[4] = A UNIX-style UTC timestamp
 func (t *ChainchatChaincode) WriteMessage(stub *shim.ChaincodeStub, args []string) error {
 	// Check we have the requisite info
 	if len(args) < 4 {
@@ -219,13 +221,15 @@ func (t *ChainchatChaincode) WriteMessage(stub *shim.ChaincodeStub, args []strin
 
 	recvID := args[0]
 	sendID := args[1]
-	msgContent := args[2]
-	timestamp := args[3]
+	toRoom := strings.Compare(args[2], "true") == 0
+	msgContent := args[3]
+	timestamp := args[4]
 
 	msg := Message{
 		ID: id,
 		ReceiverID: recvID,
 		SenderID: sendID,
+		ToRoom: toRoom,
 		Message: msgContent,
 		Timestamp: timestamp,
 	}
@@ -747,41 +751,6 @@ func (t *ChainchatChaincode) replaceUser(stub *shim.ChaincodeStub, user User) er
 	return nil
 }
 
-// Retrieves one or more users from the ledges and processes them into an array of structs
-// Returns as many users as possible, with errors in the error array for each failed retrieval
-// func (t *ChainchatChaincode) getUsers(stub *shim.ChaincodeStub, userIDs []string) ([]User, []error) {
-// 	// Check we're getting at least one user
-// 	if len(userIDs) < 1 {
-// 		errStr := fmt.Sprintf("Expected at least one user, got %d", len(userIDs))
-// 		return nil, []error{errors.New(errStr)}
-// 	}
-
-// 	// Retrieve all the users and add to the array
-// 	var users []User
-// 	var errors []error
-// 	for i := 0; i < len(userIDs); i++ {
-// 		// Extract the user ID to retrieve
-// 		userID := userIDs[i]
-
-// 		// Attempt to get the user
-// 		user, userErr := t.getUser(stub, userID)
-
-// 		// Process failure and success
-// 		if userErr != nil {
-// 			errors = append(errors, userErr)
-// 		} else {
-// 			users = append(users, user)
-// 		}
-// 	}
-
-// 	// If there were no errors just return nil for errors, otherwise return the errors with the users
-// 	if len(errors) == 0 {
-// 		return users, nil
-// 	} else {
-// 		return users, errors
-// 	}
-// }
-
 // Retrieves a single user from the ledger and processes it into a struct
 func (t *ChainchatChaincode) getUser(stub *shim.ChaincodeStub, userID string) (User, error) {
 	// Retrieve the user from the ledger
@@ -874,6 +843,10 @@ func (t *ChainchatChaincode) getAndIncrementMsgCounter(stub *shim.ChaincodeStub)
 
 // Query handles querying for chats to a certain user
 func (t *ChainchatChaincode) Query(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
+	// if function == "getMsgs" {
+	// 	return t.GetMsgs(stub, args)
+	// }
+
 	fmt.Println(fmt.Sprintf("[ERROR] Did not recognize query: %s", function))
 	return nil, errors.New("Received unknown function query")
 }
