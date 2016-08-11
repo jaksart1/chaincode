@@ -843,12 +843,99 @@ func (t *ChainchatChaincode) getAndIncrementMsgCounter(stub *shim.ChaincodeStub)
 
 // Query handles querying for chats to a certain user
 func (t *ChainchatChaincode) Query(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
-	// if function == "getMsgs" {
-	// 	return t.GetMsgs(stub, args)
-	// }
+	if function == "getMsgs" {
+		return t.GetMessagesAsBytes(stub, args)
+	}
 
 	fmt.Println(fmt.Sprintf("[ERROR] Did not recognize query: %s", function))
 	return nil, errors.New("Received unknown function query")
+}
+
+// Returns a MessageResults struct that has been marshalled into bytes containing all the message for a
+// specified receiver ID
+// args[0] = The receiver's ID, this could be a room ID or a user ID
+func (t *ChainchatChaincode) GetMessagesAsBytes(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+	// Make sure we have the right number of arguments
+	if len(args) < 1 {
+		errStr := fmt.Sprintf("[ERROR] Expected 1 argument to read messages, received %d", len(args))
+		fmt.Println(errStr)
+		return nil, errors.New(errStr)
+	}
+
+	// Extract the receiver ID
+	recvID := args[0]
+
+	// Retrieve an array of messages for that receiver
+	msgs, retrieveErr := t.getMessagesForUser(stub, recvID)
+
+	// Handle retrieval errors
+	if retrieveErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not retrieve messages: %s", retrieveErr.Error())
+		fmt.Println(errStr)
+		return nil, errors.New(errStr)
+	}
+
+	// Build the MessageResults struct
+	msgResults := MessageResults{
+		Messages: msgs,
+	}
+
+	// Marshal the struct into bytes
+	msgResultsBytes, marshalErr := json.Marshal(msgResults)
+
+	// Handle marshalling errors
+	if marshalErr != nil {
+		errStr := fmt.Sprintf("[ERROR] Could not marshal messages for %s into bytes: %s", recvID, marshalErr.Error())
+		fmt.Println(errStr)
+		return nil, errors.New(errStr)
+	}
+
+	return msgResultsBytes, nil
+}
+
+// getMessagesForUser retrieves all messages intended for the specified receiver
+// The recvID may be a room ID or a user ID
+func (t *ChainchatChaincode) getMessagesForUser(stub *shim.ChaincodeStub, recvID string) ([]Message, error) {
+	// Retrieve all the rows that are messages for the specified user
+	msgChan, msgErr := stub.GetRows("messages", []shim.Column{
+		shim.Column{Value: &shim.Column_String_{String_: "message"}},
+		shim.Column{Value: &shim.Column_String_{String_: recvID}},
+	})
+
+	// Handle message retrieval errors
+	if msgErr != nil {
+		errStr := fmt.Sprintf("Could not retrieve the messages for %s: %s", recvID, msgErr.Error())
+		return nil, errors.New(errStr)
+	}
+
+	// Extract the rows
+	var msgs []shim.Row
+	for msg := range msgChan {
+		if len(msg.Columns) != 0 {
+			msgs = append(msgs, msg)
+		}
+	}
+
+	// Parse the results into message structs and into an array of messages
+	var messageResults []Message
+	for i := 0; i < len(msgs); i++ {
+		// Extract the current row
+		msgRow := msgs[i]
+
+		// Read the message bytes and unmarshal into a message struct
+		msgStruct := Message{}
+		msgBytes := t.readBytesSafe(msgRow.Columns[MsgCol])
+		unmarshalErr := json.Unmarshal(msgBytes, &msgStruct)
+		if unmarshalErr != nil {
+			errStr := fmt.Sprintf("Could not unmarshal message %s: %s", t.readStringSafe(msgRow.Columns[MsgIDCol]), unmarshalErr.Error())
+			return nil, errors.New(errStr)
+		}
+
+		// Append the message to the messages array
+		messageResults = append(messageResults, msgStruct)
+	}
+
+	return messageResults, nil
 }
 
 func (t *ChainchatChaincode) readStringSafe(col *shim.Column) string {
